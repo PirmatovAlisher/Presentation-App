@@ -1,0 +1,241 @@
+﻿@page "/editor/{PresentationId}/{Nickname}"
+@using Microsoft.EntityFrameworkCore
+@inject AppDbContext Db
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+
+<div class="d-flex flex-column vh-100">
+    <!-- Top Toolbar -->
+    <div class="bg-dark text-white p-2">
+        <div class="d-flex justify-content-between">
+            <div>
+                <button class="btn btn-sm btn-secondary me-2" @onclick="TogglePresentMode">
+                    @(presentMode ? "Exit Present" : "Present")
+                </button>
+                @if (IsCreator)
+                {
+                    <button class="btn btn-sm btn-success me-2" @onclick="AddSlide">+ Slide</button>
+                }
+            </div>
+            <div>@Presentation?.Name</div>
+            <div>@Nickname</div>
+        </div>
+    </div>
+
+    <div class="d-flex flex-grow-1">
+        <!-- Slides Panel -->
+        <div class="bg-light p-2" style="width: 200px; overflow-y: auto">
+            @foreach (var slide in Presentation?.Slides.OrderBy(s => s.Order).ToList() ?? new List<Slide>())
+            {
+                <div class="card mb-2 @(currentSlide?.Id == slide.Id ? "border-primary" : "")"
+                     @onclick="() => SetCurrentSlide(slide)">
+                    <div class="card-body">
+                        Slide @(slide.Order + 1)
+                        @if (IsCreator && Presentation.Slides.Count > 1)
+                        {
+                            <button class="btn btn-sm btn-danger float-end"
+                            @onclick:stopPropagation
+                                    @onclick="() => RemoveSlide(slide)">
+                                ×
+                            </button>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+
+        <!-- Canvas Area -->
+        <div class="flex-grow-1 position-relative" @ref="canvasContainer">
+            @if (currentSlide != null)
+            {
+                <canvas @ref="canvas"
+                        class="position-absolute"
+                        style="cursor: @(IsEditable ? "crosshair" : "default")"></canvas>
+            }
+        </div>
+
+        <!-- Users Panel -->
+        <div class="bg-light p-2" style="width: 200px">
+            <h5>Users</h5>
+            <ul class="list-group">
+                @foreach (var user in presentationUsers)
+                {
+                    <li class="list-group-item d-flex justify-content-between">
+                        @user.UserName
+                        @if (IsCreator && user.UserName != Nickname)
+                        {
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox"
+                                       checked="@user.IsEditor"
+                                       @onchange="() => ToggleUserRole(user)" />
+                            </div>
+                        }
+                        else
+                        {
+                            <span class="badge @(user.IsEditor ? "bg-success" : "bg-info")">
+                                @(user.IsEditor ? "Editor" : "Viewer")
+                            </span>
+                        }
+                    </li>
+                }
+            </ul>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string PresentationId { get; set; }
+    [Parameter] public string Nickname { get; set; }
+
+    private Presentation Presentation;
+    private Slide currentSlide;
+    private List<PresentationUser> presentationUsers = new List<PresentationUser>();
+    private bool presentMode;
+    private ElementReference canvas;
+    private ElementReference canvasContainer;
+    private bool isDrawing;
+    private DrawingPath currentPath;
+    private bool IsCreator => Presentation?.CreatorName == Nickname;
+    private bool IsEditable => !presentMode && (IsCreator || (presentationUsers.FirstOrDefault(u => u.UserName == Nickname)?.IsEditor ?? false));
+
+    protected override async Task OnInitializedAsync()
+    {
+        Presentation = await Db.Presentations
+            .Include(p => p.Slides)
+            .ThenInclude(s => s.Drawings)
+            .ThenInclude(d => d.Points)
+            .FirstOrDefaultAsync(p => p.Id == PresentationId);
+
+        if (Presentation == null)
+        {
+            Navigation.NavigateTo("/");
+            return;
+        }
+
+        if (Presentation.Slides.Count == 0)
+        {
+            // Ensure at least one slide
+            var slide = new Slide { Order = 0 };
+            Presentation.Slides.Add(slide);
+            await Db.SaveChangesAsync();
+        }
+
+        currentSlide = Presentation.Slides.FirstOrDefault();
+
+        // Add/update user
+        var user = await Db.PresentationUsers
+            .FirstOrDefaultAsync(u => u.PresentationId == PresentationId && u.UserName == Nickname);
+
+        if (user == null)
+        {
+            user = new PresentationUser
+                {
+                    PresentationId = PresentationId,
+                    UserName = Nickname,
+                    IsEditor = IsCreator
+                };
+            Db.PresentationUsers.Add(user);
+        }
+        else
+        {
+            user.IsEditor = IsCreator || user.IsEditor;
+        }
+
+        await Db.SaveChangesAsync();
+        presentationUsers = await Db.PresentationUsers
+            .Where(u => u.PresentationId == PresentationId)
+            .ToListAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && currentSlide != null)
+        {
+            // Setup canvas
+            await JSRuntime.InvokeVoidAsync("setupCanvas",
+                canvas,
+                DotNetObjectReference.Create(this),
+                IsEditable);
+
+            // Draw existing paths
+            foreach (var drawing in currentSlide.Drawings)
+            {
+                await JSRuntime.InvokeVoidAsync("drawPath", canvas, drawing);
+            }
+        }
+    }
+
+    private void SetCurrentSlide(Slide slide)
+    {
+        currentSlide = slide;
+        StateHasChanged();
+        // Redraw canvas in OnAfterRenderAsync
+    }
+
+    private async Task AddSlide()
+    {
+        var slide = new Slide { Order = Presentation.Slides.Count };
+        Presentation.Slides.Add(slide);
+        await Db.SaveChangesAsync();
+        currentSlide = slide;
+        await ClearCanvas();
+    }
+
+    private async Task RemoveSlide(Slide slide)
+    {
+        if (Presentation.Slides.Count <= 1) return;
+
+        Presentation.Slides.Remove(slide);
+        await Db.SaveChangesAsync();
+        currentSlide = Presentation.Slides.FirstOrDefault();
+    }
+
+    private void TogglePresentMode() => presentMode = !presentMode;
+
+    private async Task ToggleUserRole(PresentationUser user)
+    {
+        user.IsEditor = !user.IsEditor;
+        Db.PresentationUsers.Update(user);
+        await Db.SaveChangesAsync();
+        presentationUsers = await Db.PresentationUsers
+            .Where(u => u.PresentationId == PresentationId)
+            .ToListAsync();
+    }
+
+    [JSInvokable]
+    public async Task StartDrawing(double x, double y)
+    {
+        if (!IsEditable) return;
+
+        isDrawing = true;
+        currentPath = new DrawingPath
+            {
+                Color = "#000000",
+                LineWidth = 3
+            };
+        currentPath.Points.Add(new Point { X = x, Y = y });
+        currentSlide.Drawings.Add(currentPath);
+        await Db.SaveChangesAsync();
+    }
+
+    [JSInvokable]
+    public async Task AddPoint(double x, double y)
+    {
+        if (!isDrawing) return;
+
+        currentPath.Points.Add(new Point { X = x, Y = y });
+        await Db.SaveChangesAsync();
+    }
+
+    [JSInvokable]
+    public void StopDrawing()
+    {
+        isDrawing = false;
+        currentPath = null;
+    }
+
+    private async Task ClearCanvas()
+    {
+        await JSRuntime.InvokeVoidAsync("clearCanvas", canvas);
+    }
+}

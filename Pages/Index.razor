@@ -1,0 +1,20 @@
+﻿@page "/"
+@inject NavigationManager Navigation
+
+<div class="card mt-5 mx-auto" style="max-width: 500px;">
+    <div class="card-body text-center">
+        <h3 class="card-title">Enter Your Nickname</h3>
+        <input @bind="nickname" class="form-control mb-3" placeholder="Your nickname" />
+        <button @onclick="Enter" class="btn btn-primary">Enter</button>
+    </div>
+</div>
+
+@code {
+    private string nickname = "";
+
+    private void Enter()
+    {
+        if (!string.IsNullOrWhiteSpace(nickname))
+            Navigation.NavigateTo($"/presentations/{Uri.EscapeDataString(nickname)}");
+    }
+}
