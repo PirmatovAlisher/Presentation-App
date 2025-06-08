@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: presentation-app
+    env: dotnet
+    buildCommand: dotnet publish -c Release -o output
+    startCommand: dotnet PresentationApp.dll
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: ConnectionStrings__Default
+        value: Data Source=app.db
